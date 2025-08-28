@@ -4,6 +4,9 @@ from langchain.agents import create_sql_agent
 from langchain.agents import initialize_agent
 from langchain.agents.agent_toolkits import SQLDatabaseToolkit
 from tools import make_distinct_values_tool
+from sqlalchemy import create_engine, MetaData, inspect
+from langchain_community.utilities import SQLDatabase
+
 
 # LLM: Gemini Pro
 llm = ChatGoogleGenerativeAI(
@@ -11,11 +14,28 @@ llm = ChatGoogleGenerativeAI(
     temperature=0,
 )
 
-# Restrict schema to only some tables
-db = SQLDatabase.from_uri(
+
+# Create engine with type hinting for geometry
+engine = create_engine(
     "postgresql+psycopg2://qgisuser:password@localhost:5432/gisdb",
-    include_tables=["mountain_peaks_india", "mountains_india", "rivers_india", "states_india"]
+    connect_args={},  # any additional
+    # There's no direct param to register Geometry here, but GeoAlchemy2 ensures type support via reflection
 )
+
+# Reflect metadata (geometry will be recognized via GeoAlchemy2)
+metadata = MetaData()
+metadata.reflect(bind=engine, schema="public")
+
+# Now LangChain database
+db = SQLDatabase(
+    engine, 
+    include_tables=["mountain_peaks_india", "mountains_india", "rivers_india", "states_india"],
+    sample_rows_in_table_info=2
+)
+
+# print(db.get_table_info(["mountains_india"]))
+
+# exit()
 
 # Toolkit with schema + LLM
 toolkit = SQLDatabaseToolkit(db=db, llm=llm)
@@ -24,16 +44,19 @@ distinct_tool = make_distinct_values_tool(db)
 
 PREFIX = """
 You are a PostgreSQL expert with PostGIS enabled.
-The database has tables with geometry columns.
-Use spatial SQL functions such as ST_Intersects, ST_Within, ST_Contains, ST_Touches, etc.
-- rivers_india.geom is a LINESTRING geometry
-- states_india.geom is a POLYGON geometry
-- mountains_india.geom is a POLYGON geometry
-- mountain_peaks_india.geom is a POINT geometry
 
-When asked spatial questions (like "Which rivers flow through Odisha"),
-you must join rivers_india with states_india and use ST_Intersects(rivers_india.geom, states_india.geom).
-Only return relevant attributes, not the geometry itself.
+The database schema includes:
+- rivers_india (rivname TEXT, geom LINESTRING)
+- states_india (name TEXT, geom POLYGON)
+- mountains_india (name TEXT, geom POLYGON)
+- mountain_peaks_india (name TEXT, geom POINT)
+
+Use PostGIS functions like ST_Intersects, ST_Within, ST_Length for geometry queries.
+
+The user will ask a natural language question. 
+Your task is to ONLY output a valid SQL query, nothing else.
+
+Before generating any SQL query with columns, make sure you check the table schema first and then use appropriate column names.
 """
 
 # Create agent
@@ -47,18 +70,29 @@ agent_executor = create_sql_agent(
 )
 
 
-# Test query
+# Test queries 1:
 #response = agent_executor.run("List the top 5 users by total spending in the last 30 days.")
 #response = agent_executor.run("What is the longitude and latitude of 'Adi Kailash' mountain peak")
 #response = agent_executor.run("Generate SQL query that will give me all the rivers running in Odisha")
 #response = agent_executor.run("Find me 5 longest rivers")
 
-while True:
-    # Take input from terminal and run the agent
-    user_query = input("Enter your query (or type 'exit' to quit): ")
-    if not user_query or user_query.lower() == 'exit':
-        break
-    response = agent_executor.run(user_query)
-    print(response)
 
+
+# Test queries 2:
+# response = agent_executor.run("SELECT r.rivname FROM rivers_india r JOIN states_india s ON ST_Intersects(r.geom, s.geom) WHERE s.state_name = 'Odisha'")
+# response = agent_executor.run("The longest river flows through which states?")
+# response = agent_executor.run("Give me all the rivers flowing through Nilgiri Mountains")  -- Not working correctly
+# response = agent_executor.run("Give me the query to check if Krishna river flows through the Nilgiri Mountains") -- Not working correctly
+
+print("\nAgent Response:\n", response)
+
+
+
+# while True:
+#     user_query = input("Enter your query (or type 'exit' to quit): ")
+#     if not user_query or user_query.lower() == 'exit':
+#         break
+
+#     response = agent_executor.run(user_query)
+#     print("\nAgent Response:\n", response)
 
